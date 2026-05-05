@@ -1,0 +1,5 @@
+# AVISO: versoes antigas INTENCIONAIS para demonstracao do pip-audit no portfolio.
+# Em producao real, sempre use as versoes mais recentes.
+
+requests==2.25.0
+flask==1.0.2

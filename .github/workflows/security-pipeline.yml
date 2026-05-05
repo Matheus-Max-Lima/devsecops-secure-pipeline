@@ -1,0 +1,136 @@
+# =============================================================================
+# Pipeline DevSecOps Seguro
+# Projeto de portfolio: automacao completa de seguranca em CI/CD
+#
+# Este workflow roda automaticamente a cada git push e verifica:
+#   1. Testes automatizados (pytest)
+#   2. Analise de codigo (Bandit - SAST)
+#   3. Dependencias vulneraveis (pip-audit - SCA)
+#   4. Secrets hardcoded (detect-secrets)
+#   5. Gera relatorio de seguranca em Markdown
+#   6. Bloqueia o pipeline se encontrar issues criticos
+# =============================================================================
+
+name: Pipeline DevSecOps Seguro
+
+# Quando este pipeline roda:
+# - Em qualquer push para a branch main
+# - Em qualquer Pull Request direcionado para a branch main
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  security-pipeline:
+    name: Security Scan & Tests
+    # Roda em uma maquina virtual Ubuntu na nuvem do GitHub
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ─────────────────────────────────────────────────────────────
+      # BLOCO 1: PREPARACAO DO AMBIENTE
+      # ─────────────────────────────────────────────────────────────
+
+      - name: "Setup | Baixar o codigo do repositorio"
+        # Faz o checkout do codigo para a maquina virtual
+        uses: actions/checkout@v4
+
+      - name: "Setup | Configurar Python 3.11"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"  # cache do pip acelera execucoes futuras
+
+      - name: "Setup | Instalar ferramentas de seguranca"
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: "Setup | Criar pasta de relatorios"
+        run: mkdir -p reports
+
+      # ─────────────────────────────────────────────────────────────
+      # BLOCO 2: TESTES AUTOMATIZADOS
+      # Se os testes falharem, o pipeline para aqui imediatamente.
+      # Nao faz sentido rodar analise de seguranca em codigo quebrado.
+      # ─────────────────────────────────────────────────────────────
+
+      - name: "Teste | pytest — validar funcionamento do codigo"
+        run: pytest tests/ -v --tb=short
+
+      # ─────────────────────────────────────────────────────────────
+      # BLOCO 3: ANALISES DE SEGURANCA
+      # Cada ferramenta usa continue-on-error: true para que TODAS
+      # rodem mesmo se uma falhar. O bloqueio acontece no final,
+      # depois de coletar todos os resultados.
+      # ─────────────────────────────────────────────────────────────
+
+      - name: "SAST | Bandit — vulnerabilidades no codigo Python"
+        # SAST = Static Application Security Testing
+        # Bandit sai com codigo 1 quando encontra issues — usamos
+        # continue-on-error para nao parar aqui e salvar o JSON.
+        id: bandit
+        run: bandit -r src/ -f json -o reports/bandit-report.json
+        continue-on-error: true
+
+      - name: "SCA | pip-audit — dependencias com CVEs conhecidos"
+        # SCA = Software Composition Analysis
+        # pip-audit sai com codigo 1 quando encontra vulnerabilidades.
+        id: pip_audit
+        run: pip-audit -r requirements.txt -f json -o reports/pip-audit-report.json
+        continue-on-error: true
+
+      - name: "Secrets | detect-secrets — credenciais hardcoded no codigo"
+        id: secrets
+        run: detect-secrets scan --all-files src/ > reports/secrets-report.json
+        continue-on-error: true
+
+      # ─────────────────────────────────────────────────────────────
+      # BLOCO 4: RELATORIO CONSOLIDADO
+      # Le todos os JSONs gerados e monta um Markdown final.
+      # continue-on-error: true para garantir que os artefatos
+      # sejam salvos mesmo quando o relatorio detecta problemas.
+      # ─────────────────────────────────────────────────────────────
+
+      - name: "Relatorio | Gerar sumario consolidado de seguranca"
+        id: generate_report
+        run: python scripts/generate_report.py
+        continue-on-error: true
+
+      # ─────────────────────────────────────────────────────────────
+      # BLOCO 5: ARTEFATOS
+      # Salva todos os relatorios para download no GitHub.
+      # if: always() garante que roda MESMO SE etapas anteriores
+      # falharam — essencial para manter as evidencias.
+      # ─────────────────────────────────────────────────────────────
+
+      - name: "Artefatos | Salvar relatorios para download"
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-reports-run-${{ github.run_number }}
+          path: reports/
+          retention-days: 90  # artefatos ficam 90 dias disponiveis
+
+      # ─────────────────────────────────────────────────────────────
+      # BLOCO 6: SECURITY GATE
+      # Este e o portao final de seguranca.
+      # Se o generate_report.py saiu com codigo 1 (issues criticos),
+      # o pipeline falha aqui com uma mensagem clara.
+      # ─────────────────────────────────────────────────────────────
+
+      - name: "Security Gate | Bloquear pipeline se houver issues criticos"
+        if: steps.generate_report.outcome == 'failure'
+        run: |
+          echo ""
+          echo "============================================================"
+          echo "  PIPELINE BLOQUEADO — Issues criticos de seguranca"
+          echo "============================================================"
+          echo "  Baixe os artefatos desta execucao para ver o relatorio"
+          echo "  completo em: reports/security-report.md"
+          echo "============================================================"
+          echo ""
+          exit 1
